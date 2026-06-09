@@ -1,0 +1,202 @@
+openapi: 3.0.3
+info:
+  title: IP Inventory API
+  version: 1.0.0
+  description: REST API for managing IP addresses (IPv4/IPv6)
+servers:
+  - url: http://localhost:18080
+paths:
+  /ip-inventory/ip-pool:
+    post:
+      summary: Add IP addresses to the pool
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddIpPoolRequest'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ip-inventory/reserve-ip:
+    post:
+      summary: Reserve an IP for a service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReserveIpRequest'
+      responses:
+        '200':
+          description: Reserved IPs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReserveIpResponse'
+        '409':
+          description: No IP available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ip-inventory/assign-ip-serviceId:
+    post:
+      summary: Assign reserved IP to a service
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignIpRequest'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '400':
+          description: Invalid state (must be reserved)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ip-inventory/terminate-ip-serviceId:
+    post:
+      summary: Terminate IP assignment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TerminateIpRequest'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '400':
+          description: IP not assigned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ip-inventory/serviceId:
+    get:
+      summary: Get IPs by service ID
+      parameters:
+        - name: serviceId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: IPs assigned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReserveIpResponse'
+        '400':
+          description: Missing serviceId
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    IpItem:
+      type: object
+      properties:
+        ip:
+          type: string
+        ipType:
+          type: string
+          enum: [IPv4, IPv6]
+
+    AddIpPoolRequest:
+      type: object
+      properties:
+        ipAddresses:
+          type: array
+          items:
+            $ref: '#/components/schemas/IpItem'
+
+    ReserveIpRequest:
+      type: object
+      properties:
+        serviceId:
+          type: string
+        ipType:
+          type: string
+          enum: [IPv4, IPv6, Both]
+
+    AssignIpRequest:
+      type: object
+      properties:
+        serviceId:
+          type: string
+        ipAddresses:
+          type: array
+          items:
+            type: object
+            properties:
+              ip:
+                type: string
+
+    TerminateIpRequest:
+      type: object
+      properties:
+        serviceId:
+          type: string
+        ipAddresses:
+          type: array
+          items:
+            type: object
+            properties:
+                ip:
+                  type: string
+
+    ReserveIpResponse:
+      type: object
+      properties:
+        ipAddresses:
+          type: array
+          items:
+            $ref: '#/components/schemas/IpItem'
+
+    StandardResponse:
+      type: object
+      properties:
+        statusCode:
+          type: string
+        statusMessage:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        statusCode:
+          type: string
+        statusMessage:
+          type: string
+        details:
+          type: string
