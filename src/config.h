@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 
 // Runtime configuration from environment variables.
@@ -34,5 +35,30 @@ namespace config
         {
             return 18080;
         }
+    }
+
+    inline int positiveInt(const char* name, int fallback)
+    {
+        try
+        {
+            const int v = std::stoi(env(name, std::to_string(fallback)));
+            return v > 0 ? v : fallback;
+        }
+        catch (const std::exception&)
+        {
+            return fallback;
+        }
+    }
+
+    // A reservation that is not assigned within this time expires.
+    inline int reservationTtlSeconds()
+    {
+        return positiveInt("RESERVATION_TTL_SECONDS", 900);
+    }
+
+    // How often the background job releases expired reservations.
+    inline int cleanupIntervalSeconds()
+    {
+        return positiveInt("CLEANUP_INTERVAL_SECONDS", 60);
     }
 }

@@ -13,29 +13,34 @@ namespace
 // =========================
 // RETRY WRAPPER (TRANSACTION SAFE)
 // =========================
+// Only serialization failures and deadlocks are retried. Business errors
+// and every other failure are rethrown at once.
 namespace
 {
     template <typename Func>
     void executeWithRetry(Func f, int maxRetries = 3)
     {
-        int attempt = 0;
-
-        while (attempt < maxRetries)
+        for (int attempt = 1; ; attempt++)
         {
             try
             {
                 f();
                 return;
             }
-            catch (const std::exception& e)
+            catch (const BusinessError&)
             {
-                attempt++;
+                throw;
+            }
+            catch (const soci::postgresql_soci_error& e)
+            {
+                const std::string state = e.sqlstate();
+                const bool retryable = (state == "40001" || state == "40P01");
+
+                if (!retryable || attempt >= maxRetries)
+                    throw;
 
                 std::cerr << "[DB RETRY] attempt " << attempt
-                          << " failed: " << e.what() << std::endl;
-
-                if (attempt >= maxRetries)
-                    throw;
+                          << " failed (" << state << "): " << e.what() << std::endl;
 
                 std::this_thread::sleep_for(
                     std::chrono::milliseconds(50 * attempt)
@@ -43,13 +48,48 @@ namespace
             }
         }
     }
+
+    // One global advisory lock serializes every mutating transaction.
+    // It is taken first in each transaction (released at commit/rollback),
+    // which makes check-then-change sequences safe and keeps the cleaner
+    // from racing with reserve/assign. Throughput is limited on purpose.
+    void lockInventory(soci::session& sql)
+    {
+        sql << "SELECT pg_advisory_xact_lock(727001)";
+    }
+
+    std::string ttlInterval(int ttlSeconds)
+    {
+        return "INTERVAL '" + std::to_string(ttlSeconds) + " seconds'";
+    }
+
+    // Frees reservations older than the TTL. Must run inside a transaction
+    // that already holds the inventory lock.
+    void releaseExpiredLocked(soci::session& sql, int ttlSeconds)
+    {
+        const std::string cutoff = "NOW() - " + ttlInterval(ttlSeconds);
+
+        sql << ("UPDATE ip_pool SET status='FREE' "
+                "WHERE status='RESERVED' AND ip IN ("
+                "   SELECT ip FROM ip_reservations WHERE reserved_at <= " + cutoff + ")");
+
+        sql << ("DELETE FROM ip_reservations WHERE reserved_at <= " + cutoff);
+    }
+
+    bool inPool(soci::session& sql, const std::string& ip)
+    {
+        int count = 0;
+        sql << "SELECT COUNT(*) FROM ip_pool WHERE ip=:ip",
+            soci::use(ip), soci::into(count);
+        return count > 0;
+    }
 }
 
 // =========================
 // CONSTRUCTOR
 // =========================
 Db::Db()
-    : pool(kPoolSize)
+    : pool(kPoolSize), ttlSeconds(config::reservationTtlSeconds())
 {
     const std::string conn = config::dbConn();
     const int maxAttempts = 30;
@@ -83,96 +123,101 @@ Db::Db()
 }
 
 // =========================
-// ADD IP TO POOL
+// ADD IPS TO POOL
 // =========================
-void Db::addIp(const std::string& ip, const std::string& type)
+void Db::addIps(const std::vector<IpEntry>& ips)
 {
     soci::session sql(pool);
     executeWithRetry([&]() {
         soci::transaction tr(sql);
+        lockInventory(sql);
 
-        sql << "INSERT INTO ip_pool(ip, ip_type, status) "
-               "VALUES(:ip, :type, 'FREE') "
-               "ON CONFLICT(ip) DO NOTHING",
-            soci::use(ip), soci::use(type);
+        for (const auto& entry : ips)
+        {
+            const std::string ip = entry.first;
+            const std::string type = entry.second;
+
+            sql << "INSERT INTO ip_pool(ip, ip_type, status) "
+                   "VALUES(:ip, :type, 'FREE') "
+                   "ON CONFLICT(ip) DO NOTHING",
+                soci::use(ip), soci::use(type);
+        }
 
         tr.commit();
     });
 }
 
 // =========================
-// SOCI already provides soci::row, but it does not define an empty() method in the official API.
+// RESERVE IPS (one IPv4 and/or one IPv6, all or nothing)
 // =========================
-inline bool empty(const soci::row& r)
+std::vector<IpEntry>
+Db::reserveIps(const std::string& serviceId, const std::string& type)
 {
-    return r.size() == 0;
-}
+    std::vector<IpEntry> result;
 
-// =========================
-// RESERVE IP (DISTRIBUTED SAFE)
-// =========================
-std::vector<std::pair<std::string, std::string>>
-Db::reserveIp(const std::string& serviceId, const std::string& type)
-{
+    std::vector<std::string> wanted;
+    if (type == "IPv4" || type == "Both")
+        wanted.push_back("IPv4");
+    if (type == "IPv6" || type == "Both")
+        wanted.push_back("IPv6");
+
     soci::session sql(pool);
-    std::vector<std::pair<std::string, std::string>> result;
-
     executeWithRetry([&]() {
+        result.clear();
+
         soci::transaction tr(sql);
+        lockInventory(sql);
 
-        // Global safety lock (optional but useful under heavy load)
-        sql << "SELECT pg_advisory_xact_lock(hashtext('reserve-ip-global'))";
+        // An expired reservation must not block the pool until the cleaner runs.
+        releaseExpiredLocked(sql, ttlSeconds);
 
-        soci::row row;
-        bool found = false;
-
-        if (type == "IPv4" || type == "IPv6")
+        for (const std::string& t : wanted)
         {
-            sql << "SELECT ip, ip_type FROM ip_pool "
-                   "WHERE status='FREE' AND ip_type=:type "
-                   "LIMIT 1",
-                soci::use(type), soci::into(row);
-        }
-        else
-        {
-            sql << "SELECT ip, ip_type FROM ip_pool "
-                   "WHERE status='FREE' "
-                   "LIMIT 1",
-                soci::into(row);
-        }
+            // Idempotency: already reserved for this serviceId?
+            bool have = false;
+            {
+                soci::rowset<soci::row> rs =
+                    (sql.prepare <<
+                        "SELECT p.ip FROM ip_reservations r "
+                        "JOIN ip_pool p ON p.ip = r.ip "
+                        "WHERE r.service_id=:sid AND p.ip_type=:type AND p.status='RESERVED' "
+                        "ORDER BY p.ip",
+                        soci::use(serviceId), soci::use(t));
 
-        if (!empty(row))
-        {
-            std::string ip = row.get<std::string>(0);
-            std::string ipType = row.get<std::string>(1);
+                for (auto it = rs.begin(); it != rs.end(); ++it)
+                {
+                    result.push_back(IpEntry(it->get<std::string>(0), t));
+                    have = true;
+                }
+            }
+            if (have)
+                continue;
 
-            // Per-IP lock (prevents double reservation)
-            sql << "SELECT pg_advisory_xact_lock(hashtext(:ip))",
+            // Take one free IP of this type.
+            std::string ip;
+            soci::statement st =
+                (sql.prepare <<
+                    "SELECT ip FROM ip_pool "
+                    "WHERE status='FREE' AND ip_type=:type "
+                    "ORDER BY ip LIMIT 1 FOR UPDATE SKIP LOCKED",
+                    soci::use(t), soci::into(ip));
+
+            if (!st.execute(true))
+                throw BusinessError(BusinessError::Kind::Conflict, "2001",
+                                    "No available IPs");
+
+            sql << "UPDATE ip_pool SET status='RESERVED' WHERE ip=:ip",
                 soci::use(ip);
 
-            // Double-check state (idempotency guard)
-            int count = 0;
-            sql << "SELECT COUNT(*) FROM ip_pool "
-                   "WHERE ip=:ip AND status='FREE'",
-                soci::use(ip), soci::into(count);
-
-            if (count == 0)
-                throw std::runtime_error("IP already reserved/assigned");
-
-            // Reserve
-            sql << "UPDATE ip_pool SET status='RESERVED' WHERE ip=:ip",
+            sql << "DELETE FROM ip_reservations WHERE ip=:ip",
                 soci::use(ip);
 
             sql << "INSERT INTO ip_reservations(ip, service_id, reserved_at) "
                    "VALUES(:ip, :sid, NOW())",
                 soci::use(ip), soci::use(serviceId);
 
-            result.push_back({ip, ipType});
-            found = true;
+            result.push_back(IpEntry(ip, t));
         }
-
-        if (!found)
-            throw std::runtime_error("No available IPs");
 
         tr.commit();
     });
@@ -180,96 +225,121 @@ Db::reserveIp(const std::string& serviceId, const std::string& type)
     return result;
 }
 
-
-
 // =========================
-// CHECK RESERVED
+// ASSIGN IPS (re-checked inside the locked transaction)
 // =========================
-bool Db::isReserved(const std::string& ip, const std::string& serviceId)
-{
-    soci::session sql(pool);
-    int count = 0;
-
-    sql << "SELECT COUNT(*) FROM ip_reservations "
-           "WHERE ip=:ip AND service_id=:sid",
-        soci::use(ip), soci::use(serviceId), soci::into(count);
-
-    return count > 0;
-}
-
-// =========================
-// ASSIGN IP (FULL SAFETY)
-// =========================
-void Db::assignIp(const std::string& ip, const std::string& serviceId)
+void Db::assignIps(const std::string& serviceId, const std::vector<std::string>& ips)
 {
     soci::session sql(pool);
     executeWithRetry([&]() {
         soci::transaction tr(sql);
+        lockInventory(sql);
 
-        // Per-IP distributed lock
-        sql << "SELECT pg_advisory_xact_lock(hashtext(:ip))",
-            soci::use(ip);
+        const std::string notExpired = "r.reserved_at > NOW() - " + ttlInterval(ttlSeconds);
 
-        // Prevent double assignment
-        int count = 0;
-        sql << "SELECT COUNT(*) FROM ip_assignments "
-               "WHERE ip=:ip AND active=TRUE",
-            soci::use(ip), soci::into(count);
+        for (const std::string& ip : ips)
+        {
+            int count = 0;
+            sql << ("SELECT COUNT(*) FROM ip_reservations r "
+                    "JOIN ip_pool p ON p.ip = r.ip "
+                    "WHERE r.ip=:ip AND r.service_id=:sid "
+                    "AND p.status='RESERVED' AND " + notExpired),
+                soci::use(ip), soci::use(serviceId), soci::into(count);
 
-        if (count > 0)
-            throw std::runtime_error("IP already assigned");
+            if (count == 0)
+            {
+                if (!inPool(sql, ip))
+                    throw BusinessError(BusinessError::Kind::NotFound, "3002",
+                                        "IP not in pool: " + ip);
 
-        // Ensure it was reserved
-        sql << "UPDATE ip_pool SET status='ASSIGNED' WHERE ip=:ip",
-            soci::use(ip);
+                throw BusinessError(BusinessError::Kind::Conflict, "3001",
+                                    "IP is not reserved for this serviceId (or the reservation expired): " + ip);
+            }
 
-        sql << "INSERT INTO ip_assignments(ip, service_id, assigned_at, active) "
-               "VALUES(:ip, :sid, NOW(), TRUE)",
-            soci::use(ip), soci::use(serviceId);
+            sql << "UPDATE ip_pool SET status='ASSIGNED' WHERE ip=:ip",
+                soci::use(ip);
 
-        // Remove reservation (idempotent cleanup)
-        sql << "DELETE FROM ip_reservations "
-               "WHERE ip=:ip AND service_id=:sid",
-            soci::use(ip), soci::use(serviceId);
+            sql << "INSERT INTO ip_assignments(ip, service_id, assigned_at, active) "
+                   "VALUES(:ip, :sid, NOW(), TRUE)",
+                soci::use(ip), soci::use(serviceId);
+
+            sql << "DELETE FROM ip_reservations WHERE ip=:ip",
+                soci::use(ip);
+        }
 
         tr.commit();
     });
 }
 
 // =========================
-// CHECK ASSIGNED
+// TERMINATE IPS
 // =========================
-bool Db::isAssigned(const std::string& ip, const std::string& serviceId)
-{
-    soci::session sql(pool);
-    int count = 0;
-
-    sql << "SELECT COUNT(*) FROM ip_assignments "
-           "WHERE ip=:ip AND service_id=:sid AND active=TRUE",
-        soci::use(ip), soci::use(serviceId), soci::into(count);
-
-    return count > 0;
-}
-
-// =========================
-// TERMINATE IP
-// =========================
-void Db::terminateIp(const std::string& ip, const std::string& serviceId)
+void Db::terminateIps(const std::string& serviceId, const std::vector<std::string>& ips)
 {
     soci::session sql(pool);
     executeWithRetry([&]() {
         soci::transaction tr(sql);
+        lockInventory(sql);
 
-        sql << "SELECT pg_advisory_xact_lock(hashtext(:ip))",
-            soci::use(ip);
+        for (const std::string& ip : ips)
+        {
+            int count = 0;
+            sql << "SELECT COUNT(*) FROM ip_assignments "
+                   "WHERE ip=:ip AND service_id=:sid AND active=TRUE",
+                soci::use(ip), soci::use(serviceId), soci::into(count);
 
-        sql << "UPDATE ip_pool SET status='FREE' WHERE ip=:ip",
-            soci::use(ip);
+            if (count == 0)
+            {
+                if (!inPool(sql, ip))
+                    throw BusinessError(BusinessError::Kind::NotFound, "3002",
+                                        "IP not in pool: " + ip);
 
-        sql << "UPDATE ip_assignments "
-               "SET active=FALSE "
-               "WHERE ip=:ip AND service_id=:sid",
-            soci::use(ip), soci::use(serviceId);
+                throw BusinessError(BusinessError::Kind::Conflict, "4001",
+                                    "IP is not assigned to this serviceId: " + ip);
+            }
+
+            sql << "UPDATE ip_assignments SET active=FALSE "
+                   "WHERE ip=:ip AND service_id=:sid AND active=TRUE",
+                soci::use(ip), soci::use(serviceId);
+
+            sql << "UPDATE ip_pool SET status='FREE' WHERE ip=:ip",
+                soci::use(ip);
+        }
+
+        tr.commit();
+    });
+}
+
+// =========================
+// CHANGE SERVICE ID
+// =========================
+void Db::changeServiceId(const std::string& oldId, const std::string& newId)
+{
+    soci::session sql(pool);
+    executeWithRetry([&]() {
+        soci::transaction tr(sql);
+        lockInventory(sql);
+
+        releaseExpiredLocked(sql, ttlSeconds);
+
+        int assigned = 0;
+        sql << "SELECT COUNT(*) FROM ip_assignments WHERE service_id=:sid AND active=TRUE",
+            soci::use(oldId), soci::into(assigned);
+
+        int reserved = 0;
+        sql << "SELECT COUNT(*) FROM ip_reservations WHERE service_id=:sid",
+            soci::use(oldId), soci::into(reserved);
+
+        if (assigned == 0 && reserved == 0)
+            throw BusinessError(BusinessError::Kind::NotFound, "6001",
+                                "No IP is assigned or reserved for serviceIdOld");
+
+        sql << "UPDATE ip_assignments SET service_id=:newid "
+               "WHERE service_id=:oldid AND active=TRUE",
+            soci::use(newId, "newid"), soci::use(oldId, "oldid");
+
+        sql << "UPDATE ip_reservations SET service_id=:newid WHERE service_id=:oldid",
+            soci::use(newId, "newid"), soci::use(oldId, "oldid");
 
         tr.commit();
     });
@@ -278,54 +348,43 @@ void Db::terminateIp(const std::string& ip, const std::string& serviceId)
 // =========================
 // GET BY SERVICE
 // =========================
-std::vector<std::pair<std::string, std::string>>
+std::vector<IpEntry>
 Db::getByService(const std::string& serviceId)
 {
     soci::session sql(pool);
-    std::vector<std::pair<std::string, std::string>> result;
+    std::vector<IpEntry> result;
 
     soci::rowset<soci::row> rs =
         (sql.prepare <<
             "SELECT p.ip, p.ip_type "
             "FROM ip_pool p "
             "JOIN ip_assignments a ON a.ip=p.ip "
-            "WHERE a.service_id=:sid AND a.active=TRUE",
+            "WHERE a.service_id=:sid AND a.active=TRUE "
+            "ORDER BY p.ip",
             soci::use(serviceId));
 
     for (auto it = rs.begin(); it != rs.end(); ++it)
     {
-        result.push_back({
+        result.push_back(IpEntry(
             it->get<std::string>(0),
             it->get<std::string>(1)
-        });
+        ));
     }
 
     return result;
 }
 
 // =========================
-// RELEASE EXPIRED RESERVATIONS
+// RELEASE EXPIRED RESERVATIONS (cleaner job)
 // =========================
 void Db::releaseExpiredReservations()
 {
     soci::session sql(pool);
     executeWithRetry([&]() {
         soci::transaction tr(sql);
+        lockInventory(sql);
 
-        // Global lock so only ONE node cleans at a time
-        sql << "SELECT pg_advisory_xact_lock(hashtext('cleanup-expired-reservations'))";
-
-        // Free expired IPs safely
-        sql << "UPDATE ip_pool "
-               "SET status='FREE' "
-               "WHERE ip IN ("
-               "   SELECT ip FROM ip_reservations "
-               "   WHERE reserved_at < NOW() - INTERVAL '15 minutes'"
-               ")";
-
-        // Remove expired reservations (idempotent)
-        sql << "DELETE FROM ip_reservations "
-               "WHERE reserved_at < NOW() - INTERVAL '15 minutes'";
+        releaseExpiredLocked(sql, ttlSeconds);
 
         tr.commit();
     });

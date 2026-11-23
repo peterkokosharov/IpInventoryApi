@@ -108,3 +108,25 @@ target_link_libraries(IPInventoryApi PRIVATE
     PostgreSQL::PostgreSQL
     Threads::Threads
 )
+
+if(WIN32)
+    target_link_libraries(IPInventoryApi PRIVATE ws2_32)
+endif()
+
+# ---------------------------------------------------------------
+# Unit tests (ctest): pure helpers only, no database needed
+# ---------------------------------------------------------------
+# (skipped when tests/ is absent, e.g. in the Docker build context)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ip_utils.cpp")
+    enable_testing()
+
+    add_executable(test_ip_utils
+        tests/test_ip_utils.cpp
+        src/ip_utils.cpp
+    )
+    target_include_directories(test_ip_utils PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    if(WIN32)
+        target_link_libraries(test_ip_utils PRIVATE ws2_32)
+    endif()
+    add_test(NAME ip_utils COMMAND test_ip_utils)
+endif()

@@ -2,6 +2,7 @@
 
 #include <crow.h>
 #include "db.h"
+#include <functional>
 #include <string>
 #include <vector>
 #include <memory>
@@ -22,6 +23,8 @@ public:
 
     crow::response terminateIp(const crow::request& req);
 
+    crow::response serviceIdChange(const crow::request& req);
+
     crow::response getByService(const crow::request& req);
 
     // =========================
@@ -37,6 +40,10 @@ private:
     // =========================
     crow::response ok(const crow::json::wvalue& body);
 
+    crow::response okStatus();
+
+    crow::response ipList(const std::vector<IpEntry>& ips);
+
     crow::response error(
         const std::string& code,
         const std::string& message,
@@ -44,5 +51,7 @@ private:
         int httpStatus = 400
     );
 
-    bool isValidIp(const std::string& ip);
+    // Runs a handler body and maps exceptions to responses:
+    // bad input -> 400, BusinessError -> 409 / 404, anything else -> 500.
+    crow::response guarded(const std::function<crow::response()>& fn);
 };

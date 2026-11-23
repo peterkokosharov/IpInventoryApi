@@ -87,6 +87,14 @@ int main()
     });
 
     // =========================
+    // API: SERVICE ID CHANGE
+    // =========================
+    CROW_ROUTE(app, "/ip-inventory/serviceId-change").methods("POST"_method)
+    ([service](const crow::request& req){
+        return service->serviceIdChange(req);
+    });
+
+    // =========================
     // API: SERVICE LOOKUP
     // =========================
     CROW_ROUTE(app, "/ip-inventory/serviceId").methods("GET"_method)
@@ -97,7 +105,8 @@ int main()
     // =========================
     // BACKGROUND CLEANER THREAD
     // =========================
-    std::thread([service](){
+    const int cleanupInterval = config::cleanupIntervalSeconds();
+    std::thread([service, cleanupInterval](){
         while (true)
         {
             try
@@ -108,7 +117,7 @@ int main()
             {
                 std::cerr << "[CLEANER] failed: " << e.what() << std::endl;
             }
-            std::this_thread::sleep_for(std::chrono::minutes(1));
+            std::this_thread::sleep_for(std::chrono::seconds(cleanupInterval));
         }
     }).detach();
 
