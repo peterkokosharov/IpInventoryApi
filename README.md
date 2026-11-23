@@ -8,6 +8,8 @@ A small IP inventory service written in C++17:
 - Swagger UI for the API description
 - Docker Compose setup and a GitHub Actions pipeline
 
+Quick start for an AI agent on a Linux laptop: see `HOME-RUN.md`.
+
 Task: see `IP_inventory_task.pdf`. See "Limitations" below for what the service does not do.
 
 ## Features
