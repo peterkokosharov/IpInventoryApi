@@ -1,0 +1,12 @@
+.git
+.github
+.idea
+.vscode
+build
+build-*
+cmake-build-*
+IPInventoryApi
+tests
+sql
+*.pdf
+README.md
