@@ -169,8 +169,6 @@ short reservation TTL, and checks that `docker compose build` works.
   released reservation is already refused by assign and reclaimed by the next reserve.
 - The `ip-pool` GUI from the task description ("nice to have") is not implemented; use
   Swagger UI.
-- The code in this repository was written without a local compiler; the build and the tests
-  run in GitHub Actions.
 
 ## Example flow
 
