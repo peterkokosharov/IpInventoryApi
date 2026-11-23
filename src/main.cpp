@@ -1,9 +1,17 @@
 #include <crow.h>
 #include "ip_service.h"
+#include "config.h"
+#include <chrono>
+#include <fstream>
+#include <iostream>
 #include <memory>
+#include <sstream>
+#include <thread>
 
 int main()
 {
+    const std::string staticDir = config::staticDir();
+
     crow::SimpleApp app;
     auto service = std::make_shared<IpService>();
 
@@ -19,8 +27,8 @@ int main()
     // SWAGGER UI
     // =========================
     CROW_ROUTE(app, "/swagger")
-    ([](){
-        std::ifstream file("static/swagger.html");
+    ([staticDir](){
+        std::ifstream file(staticDir + "/swagger.html");
         if (!file.is_open())
             return crow::response(500, "Swagger UI not found");
 
@@ -33,8 +41,8 @@ int main()
     });
 
     CROW_ROUTE(app, "/swagger.yaml")
-    ([](){
-        std::ifstream file("static/swagger.yaml");
+    ([staticDir](){
+        std::ifstream file(staticDir + "/swagger.yaml");
         if (!file.is_open())
             return crow::response(500, "Swagger YAML not found");
 
@@ -92,10 +100,17 @@ int main()
     std::thread([service](){
         while (true)
         {
-            service->releaseExpiredReservations();
+            try
+            {
+                service->releaseExpiredReservations();
+            }
+            catch (const std::exception& e)
+            {
+                std::cerr << "[CLEANER] failed: " << e.what() << std::endl;
+            }
             std::this_thread::sleep_for(std::chrono::minutes(1));
         }
     }).detach();
 
-    app.port(18080).multithreaded().run();
+    app.port(static_cast<uint16_t>(config::port())).multithreaded().run();
 }

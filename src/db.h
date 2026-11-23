@@ -1,6 +1,7 @@
 #pragma once
 
 #include <soci/soci.h>
+#include <soci/connection-pool.h>
 #include <string>
 #include <vector>
 
@@ -43,5 +44,7 @@ public:
     void releaseExpiredReservations();
 
 private:
-    soci::session sql;
+    // Each operation takes its own session from the pool,
+    // so request threads and the cleaner thread never share one.
+    soci::connection_pool pool;
 };

@@ -3,6 +3,12 @@
 #include <chrono>
 #include <thread>
 #include <iostream>
+#include "config.h"
+
+namespace
+{
+    const std::size_t kPoolSize = 8;
+}
 
 // =========================
 // RETRY WRAPPER (TRANSACTION SAFE)
@@ -43,9 +49,37 @@ namespace
 // CONSTRUCTOR
 // =========================
 Db::Db()
-    : sql(soci::postgresql,
-          "dbname=ip_inventory user=postgres password=postgres host=localhost port=5432")
+    : pool(kPoolSize)
 {
+    const std::string conn = config::dbConn();
+    const int maxAttempts = 30;
+
+    // Wait for the database instead of crashing when it is not up yet.
+    for (int attempt = 1; ; attempt++)
+    {
+        try
+        {
+            for (std::size_t i = 0; i < kPoolSize; i++)
+                pool.at(i).open(soci::postgresql, conn);
+            break;
+        }
+        catch (const std::exception& e)
+        {
+            // open() refuses an already open session, so reset before retrying
+            for (std::size_t i = 0; i < kPoolSize; i++)
+            {
+                try { pool.at(i).close(); } catch (...) {}
+            }
+
+            std::cerr << "[DB CONNECT] attempt " << attempt << "/" << maxAttempts
+                      << " failed: " << e.what() << std::endl;
+
+            if (attempt >= maxAttempts)
+                throw;
+
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+    }
 }
 
 // =========================
@@ -53,6 +87,7 @@ Db::Db()
 // =========================
 void Db::addIp(const std::string& ip, const std::string& type)
 {
+    soci::session sql(pool);
     executeWithRetry([&]() {
         soci::transaction tr(sql);
 
@@ -79,6 +114,7 @@ inline bool empty(const soci::row& r)
 std::vector<std::pair<std::string, std::string>>
 Db::reserveIp(const std::string& serviceId, const std::string& type)
 {
+    soci::session sql(pool);
     std::vector<std::pair<std::string, std::string>> result;
 
     executeWithRetry([&]() {
@@ -151,6 +187,7 @@ Db::reserveIp(const std::string& serviceId, const std::string& type)
 // =========================
 bool Db::isReserved(const std::string& ip, const std::string& serviceId)
 {
+    soci::session sql(pool);
     int count = 0;
 
     sql << "SELECT COUNT(*) FROM ip_reservations "
@@ -165,6 +202,7 @@ bool Db::isReserved(const std::string& ip, const std::string& serviceId)
 // =========================
 void Db::assignIp(const std::string& ip, const std::string& serviceId)
 {
+    soci::session sql(pool);
     executeWithRetry([&]() {
         soci::transaction tr(sql);
 
@@ -203,6 +241,7 @@ void Db::assignIp(const std::string& ip, const std::string& serviceId)
 // =========================
 bool Db::isAssigned(const std::string& ip, const std::string& serviceId)
 {
+    soci::session sql(pool);
     int count = 0;
 
     sql << "SELECT COUNT(*) FROM ip_assignments "
@@ -217,6 +256,7 @@ bool Db::isAssigned(const std::string& ip, const std::string& serviceId)
 // =========================
 void Db::terminateIp(const std::string& ip, const std::string& serviceId)
 {
+    soci::session sql(pool);
     executeWithRetry([&]() {
         soci::transaction tr(sql);
 
@@ -241,6 +281,7 @@ void Db::terminateIp(const std::string& ip, const std::string& serviceId)
 std::vector<std::pair<std::string, std::string>>
 Db::getByService(const std::string& serviceId)
 {
+    soci::session sql(pool);
     std::vector<std::pair<std::string, std::string>> result;
 
     soci::rowset<soci::row> rs =
@@ -267,6 +308,7 @@ Db::getByService(const std::string& serviceId)
 // =========================
 void Db::releaseExpiredReservations()
 {
+    soci::session sql(pool);
     executeWithRetry([&]() {
         soci::transaction tr(sql);
 
