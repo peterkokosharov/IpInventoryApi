@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: IP Inventory API
-  version: 1.0.0
+  version: 1.1.0
   description: REST API for managing IP addresses (IPv4/IPv6)
 servers:
   - url: http://localhost:18080
@@ -23,7 +23,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/StandardResponse'
         '400':
-          description: Invalid request
+          description: Invalid request (bad JSON, invalid IP, ipType does not match the address)
           content:
             application/json:
               schema:
@@ -31,7 +31,12 @@ paths:
 
   /ip-inventory/reserve-ip:
     post:
-      summary: Reserve an IP for a service
+      summary: Reserve IP address(es) for a service
+      description: >-
+        ipType IPv4 or IPv6 reserves one address of that type, Both reserves one IPv4
+        and one IPv6 (all or nothing). Idempotent: addresses already reserved for the
+        serviceId are returned instead of reserving new ones. A reservation that is
+        not assigned within the configured time expires.
       requestBody:
         required: true
         content:
@@ -45,8 +50,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReserveIpResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '409':
-          description: No IP available
+          description: No free IP of the requested type is available
           content:
             application/json:
               schema:
@@ -69,7 +80,19 @@ paths:
               schema:
                 $ref: '#/components/schemas/StandardResponse'
         '400':
-          description: Invalid state (must be reserved)
+          description: Invalid request (bad JSON, invalid IP)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: IP is not in the pool
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: IP is not reserved for this serviceId, the reservation expired, or the IP is already assigned
           content:
             application/json:
               schema:
@@ -92,7 +115,49 @@ paths:
               schema:
                 $ref: '#/components/schemas/StandardResponse'
         '400':
-          description: IP not assigned
+          description: Invalid request (bad JSON, invalid IP)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: IP is not in the pool
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: IP is not assigned to this serviceId
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ip-inventory/serviceId-change:
+    post:
+      summary: Change the assignment from the old serviceId to a new serviceId
+      description: Moves the active assignments (and open reservations) of serviceIdOld to serviceId.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceIdChangeRequest'
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StandardResponse'
+        '400':
+          description: Invalid request (missing or wrong fields, old and new serviceId equal)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: serviceIdOld has no assigned or reserved IP
           content:
             application/json:
               schema:
@@ -109,7 +174,7 @@ paths:
             type: string
       responses:
         '200':
-          description: IPs assigned
+          description: IPs assigned to the serviceId (empty array if none)
           content:
             application/json:
               schema:
@@ -175,6 +240,15 @@ components:
                 ip:
                   type: string
 
+    ServiceIdChangeRequest:
+      type: object
+      required: [serviceIdOld, serviceId]
+      properties:
+        serviceIdOld:
+          type: string
+        serviceId:
+          type: string
+
     ReserveIpResponse:
       type: object
       properties:
@@ -190,9 +264,14 @@ components:
           type: string
         statusMessage:
           type: string
+          example: Successful operation. OK
 
     ErrorResponse:
       type: object
+      description: >-
+        statusCode 1000-1003 invalid input, 2001 no free IP, 3001 not reserved,
+        3002 IP not in pool, 4001 not assigned, 5001 missing parameter,
+        6001 no IP for serviceIdOld, 9000 internal error
       properties:
         statusCode:
           type: string
