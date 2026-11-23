@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ipinventory
+          POSTGRES_USER: ipinventory
+          POSTGRES_PASSWORD: ipinventory
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ipinventory -d ipinventory"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGPASSWORD: ipinventory
+      DB_CONN: "dbname=ipinventory user=ipinventory password=ipinventory host=localhost port=5432"
+      PORT: "18080"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libasio-dev libsoci-dev libpq-dev libboost-dev \
+            postgresql-client curl jq
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: Apply schema
+        run: psql -h localhost -U ipinventory -d ipinventory -v ON_ERROR_STOP=1 -f sql/schema.sql
+
+      - name: Start application
+        run: |
+          STATIC_DIR="$PWD/static" nohup ./build/IPInventoryApi > app.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:18080/health > /dev/null; then echo "up"; exit 0; fi
+            sleep 1
+          done
+          echo "application did not start"; cat app.log; exit 1
+
+      - name: Smoke test
+        run: tests/smoke.sh
+
+      - name: Application log
+        if: always()
+        run: cat app.log || true
+
+  docker-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build images
+        run: docker compose build
