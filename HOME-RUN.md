@@ -70,19 +70,12 @@ Swagger UI: http://localhost:18080/swagger (the human can open it in a browser; 
 
 ## Step 4: integration suite
 
-Compose does NOT pass `RESERVATION_TTL_SECONDS` / `CLEANUP_INTERVAL_SECONDS` through (the `app` service sets only
-`DB_CONN` and `PORT`). With the plain stack the TTL is 900 s and the expiry cases are SKIPPED. That is not an
-error. To run the expiry cases too, restart with a temporary override file kept outside the repo (no repo edit):
+Compose passes `RESERVATION_TTL_SECONDS` (default 900) and `CLEANUP_INTERVAL_SECONDS` (default 60) through to the
+`app` service. With the defaults the expiry cases are SKIPPED. That is not an error. To run the expiry cases too,
+recreate the app with short values (no repo edit):
 
 ```
-cat > /tmp/ttl-override.yml <<'EOF'
-services:
-  app:
-    environment:
-      RESERVATION_TTL_SECONDS: "10"
-      CLEANUP_INTERVAL_SECONDS: "2"
-EOF
-docker compose -f docker-compose.yml -f /tmp/ttl-override.yml up -d
+RESERVATION_TTL_SECONDS=10 CLEANUP_INTERVAL_SECONDS=2 docker compose up -d --build
 until curl -sf http://localhost:18080/health >/dev/null; do sleep 1; done
 ```
 
@@ -93,7 +86,7 @@ Run the suite (needs host `psql`; port 5432 is published by compose; the script'
 RESET_DB=1 RESERVATION_TTL_SECONDS=10 BASE_URL=http://localhost:18080 bash tests/integration.sh; echo "exit=$?"
 ```
 
-(If you skipped the override, omit `RESERVATION_TTL_SECONDS=10`; the expiry case then prints SKIP.)
+(If you skipped the short values, omit `RESERVATION_TTL_SECONDS=10`; the expiry case then prints SKIP.)
 
 Expected: only `PASS:` lines, last lines `== N passed, 0 failed, S skipped` and `INTEGRATION TESTS PASSED`,
 `exit=0`. With the override and psql there should be no SKIP lines. Without host psql there are SKIPs for the
@@ -134,12 +127,11 @@ Expected: OK status JSON; the two IPs now under demo-2; OK status JSON; finally 
 ## Step 6: clean up
 
 ```
-docker compose down -v; rm -f /tmp/ttl-override.yml
+docker compose down -v
 docker compose ps
 ```
 
-Expected: containers and the `pgdata` volume are removed; `docker compose ps` lists nothing. (If you used the
-override file, `docker compose down -v` still works without `-f`, it uses the project name.)
+Expected: containers and the `pgdata` volume are removed; `docker compose ps` lists nothing. 
 
 ## Report format
 

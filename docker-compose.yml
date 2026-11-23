@@ -24,6 +24,8 @@ services:
     environment:
       DB_CONN: "dbname=ipinventory user=ipinventory password=ipinventory host=db port=5432"
       PORT: "18080"
+      RESERVATION_TTL_SECONDS: ${RESERVATION_TTL_SECONDS:-900}
+      CLEANUP_INTERVAL_SECONDS: ${CLEANUP_INTERVAL_SECONDS:-60}
     ports:
       - "18080:18080"
 

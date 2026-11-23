@@ -169,6 +169,9 @@ short reservation TTL, and checks that `docker compose build` works.
 - `GET /ip-inventory/serviceId` returns assigned IPs only, not reserved ones.
 - Reservation expiry uses the database clock and a periodic job; an expired but not yet
   released reservation is already refused by assign and reclaimed by the next reserve.
+- Undefined by the task: reserve for a serviceId that already has an ASSIGNED IP of that type hands out
+  an additional IP.
+- serviceId-change into a serviceId that already holds IPs merges them.
 - The `ip-pool` GUI from the task description ("nice to have") is not implemented; use
   Swagger UI.
 
