@@ -1,4 +1,9 @@
 /build/
+/build-*/
+/cmake-build-*/
 /.vscode/
-/*.exe
-/*.dll
+/.idea/
+/IPInventoryApi
+*.exe
+*.dll
+*.o
