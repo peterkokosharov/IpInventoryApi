@@ -1,144 +1,137 @@
-IP Inventory REST API (C++ / PostgreSQL / Docker)
+# IP Inventory REST API (C++ / PostgreSQL)
 
-A production-grade IP inventory management system written in modern C++ with:
+A small IP inventory service written in C++17:
 
-REST API (Crow)
-PostgreSQL backend (SOCI ORM)
-Distributed locking (advisory locks)
-Retry-safe transactions
-Swagger UI documentation
-Dockerized deployment (Linux / Windows compatible)
-🚀 Features
-Core IP Lifecycle
-Add IPs to pool
-Reserve IPs for serviceId
-Assign reserved IPs
-Terminate IP assignments
-Query IPs by serviceId
-Production-grade capabilities
-✅ Distributed locking (prevents double assignment)
-✅ Retry-safe DB transactions
-✅ Automatic reservation expiration (15 min)
-✅ Idempotent database operations
-✅ Multi-instance safe (Docker / scaling ready)
-🧱 Architecture
+- REST API (Crow)
+- PostgreSQL backend (SOCI), with a connection pool
+- Advisory locks and retried transactions around reserve / assign / terminate
+- Swagger UI for the API description
+- Docker Compose setup and a GitHub Actions pipeline
+
+The project is a work in progress. Known gaps (input validation, error handling
+for some edge cases, test coverage) are being worked on.
+
+## Features
+
+- Add IPv4 / IPv6 addresses to the pool
+- Reserve an IP for a serviceId
+- Assign a reserved IP
+- Terminate an assignment
+- Query IPs by serviceId
+- Reservations older than 15 minutes are released by a background job (runs every minute)
+
+## Architecture
+
+```
 Swagger UI
-    ↓
+    |
 Crow REST API (C++)
-    ↓
-IpService (Business Logic)
-    ↓
-Db Layer (SOCI ORM)
-    ↓
+    |
+IpService (business logic)
+    |
+Db layer (SOCI, connection pool)
+    |
 PostgreSQL
-📁 Project Structure
-IPInventory/
-├── src/
-│   ├── main.cpp
-│   ├── ip_service.h
-│   ├── ip_service.cpp
-│   ├── db.h
-│   ├── db.cpp
-│   ├── models.h
-├── static/
-│   ├── swagger.html
-│   ├── swagger.yaml
-├── docker-compose.yml
-├── Dockerfile
-├── CMakeLists.txt
-└── README.md
-⚙️ API Endpoints
-📌 Add IPs to pool
-POST /ip-inventory/ip-pool
-📌 Reserve IP
-POST /ip-inventory/reserve-ip
-📌 Assign IP
-POST /ip-inventory/assign-ip-serviceId
-📌 Terminate IP
-POST /ip-inventory/terminate-ip-serviceId
-📌 Get IPs by serviceId
-GET /ip-inventory/serviceId?serviceId=xxx
-🌐 Swagger UI
+```
 
-After running the server:
+## Project structure
 
-http://localhost:18080/swagger
+```
+src/                 C++ sources (main, ip_service, db, config)
+static/              swagger.html, swagger.yaml
+sql/schema.sql       database schema
+tests/smoke.sh       end-to-end smoke test (bash, curl, jq)
+Dockerfile           multi-stage image build
+docker-compose.yml   app + PostgreSQL 16
+.github/workflows/   CI
+CMakeLists.txt
+```
 
-Swagger YAML:
+## API endpoints
 
-http://localhost:18080/swagger.yaml
-🐘 Database Setup (PostgreSQL)
+| Operation | Endpoint |
+|---|---|
+| Add IPs to pool | `POST /ip-inventory/ip-pool` |
+| Reserve IP | `POST /ip-inventory/reserve-ip` |
+| Assign IP | `POST /ip-inventory/assign-ip-serviceId` |
+| Terminate IP | `POST /ip-inventory/terminate-ip-serviceId` |
+| Get IPs by serviceId | `GET /ip-inventory/serviceId?serviceId=xxx` |
+| Health | `GET /health` |
+| Swagger UI / YAML | `GET /swagger`, `GET /swagger.yaml` |
 
-Create database:
+IPv6 addresses are currently accepted only in the full eight-group form
+(for example `2001:db8:0:0:0:0:0:1`).
 
-CREATE DATABASE ip_inventory;
+## Configuration
 
-Tables:
+Environment variables:
 
-CREATE TABLE ip_pool (
-    ip TEXT PRIMARY KEY,
-    ip_type TEXT,
-    status TEXT DEFAULT 'FREE'
-);
+| Variable | Default | Meaning |
+|---|---|---|
+| `DB_CONN` | `dbname=ipinventory user=ipinventory password=ipinventory host=localhost port=5432` | libpq connection string |
+| `PORT` | `18080` | HTTP port |
+| `STATIC_DIR` | `./static` | directory with swagger.html / swagger.yaml |
 
-CREATE TABLE ip_reservations (
-    ip TEXT,
-    service_id TEXT,
-    reserved_at TIMESTAMP DEFAULT NOW()
-);
+At startup the application retries the database connection for about 30 seconds.
 
-CREATE TABLE ip_assignments (
-    ip TEXT,
-    service_id TEXT,
-    assigned_at TIMESTAMP DEFAULT NOW(),
-    active BOOLEAN DEFAULT TRUE
-);
-🐳 Docker Deployment
-Build and run
-docker-compose build
-docker-compose up -d
-Services
-Service	URL
-API	http://localhost:18080
-Swagger UI	http://localhost:18080/swagger
-PostgreSQL	localhost:5432
-Stop system
-docker-compose down
-🔐 Concurrency Safety
+## Run with Docker Compose
 
-This system prevents race conditions using:
+```
+docker compose up --build
+```
 
-✔ PostgreSQL advisory locks
-pg_advisory_xact_lock(hashtext(ip))
-✔ Global cleanup lock
-Prevents multiple nodes from expiring reservations simultaneously
-✔ Retry-safe transactions
-Automatic retry on deadlocks or transient failures
-⏱ Reservation Expiration
-Reserved IP expires after 15 minutes
-Automatically returned to FREE pool
-Background cleanup job runs every minute
-🧠 Key Design Principles
-No shared mutable state in application layer
-Database is source of truth
-All operations are idempotent
-Safe for horizontal scaling
-Stateless API nodes
-🛠 Build (Local)
-mkdir build
-cd build
-cmake ..
-cmake --build . --config Release
+- API: http://localhost:18080
+- Swagger UI: http://localhost:18080/swagger
+- PostgreSQL: localhost:5432 (database, user and password `ipinventory`)
 
-Run:
+The schema in `sql/schema.sql` is applied automatically when the database
+volume is created. Stop with `docker compose down` (add `-v` to drop the data).
 
-./IPInventoryApi
-🚀 Example Flow
-1. Add IPs
-POST /ip-inventory/ip-pool
-2. Reserve IP
-POST /ip-inventory/reserve-ip
-3. Assign IP
-POST /ip-inventory/assign-ip-serviceId
-4. Query
-GET /ip-inventory/serviceId?serviceId=abc
+## Build locally (Linux)
+
+Dependencies on Ubuntu 24.04:
+
+```
+sudo apt-get install build-essential cmake libasio-dev libsoci-dev libpq-dev libboost-dev
+```
+
+Crow is downloaded by CMake (pinned release v1.2.0).
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+psql -U ipinventory -d ipinventory -f sql/schema.sql   # once, on an empty database
+./build/IPInventoryApi
+```
+
+## Database
+
+Tables `ip_pool`, `ip_reservations`, `ip_assignments` are defined in
+`sql/schema.sql`, including primary keys, CHECK constraints on status and
+IP type, a unique index that allows at most one active assignment per IP,
+and indexes on `service_id`.
+
+## Tests and CI
+
+`tests/smoke.sh` runs the main flow against a running instance
+(`BASE_URL`, default `http://localhost:18080`): add pool, reserve, assign,
+query, terminate.
+
+GitHub Actions (`.github/workflows/ci.yml`) builds the project on
+ubuntu-24.04, starts PostgreSQL 16, applies the schema, runs the smoke test,
+and checks that `docker compose build` works.
+
+## Concurrency
+
+- PostgreSQL advisory locks (`pg_advisory_xact_lock`) serialize changes per IP
+  and a global lock is used for reservation and for the cleanup job.
+- Each operation takes its own session from a pool of 8 connections.
+- Transactions are retried up to 3 times on failure.
+
+## Example flow
+
+1. Add IPs: `POST /ip-inventory/ip-pool`
+2. Reserve: `POST /ip-inventory/reserve-ip`
+3. Assign: `POST /ip-inventory/assign-ip-serviceId`
+4. Query: `GET /ip-inventory/serviceId?serviceId=abc`
+5. Terminate: `POST /ip-inventory/terminate-ip-serviceId`
