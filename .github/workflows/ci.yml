@@ -54,7 +54,7 @@ jobs:
           echo "application did not start"; cat app.log; exit 1
 
       - name: Smoke test
-        run: tests/smoke.sh
+        run: bash tests/smoke.sh
 
       - name: Application log
         if: always()
